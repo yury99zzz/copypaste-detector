@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from cache.search_cache import SearchCache
 from pipeline.preprocessor import preprocess
 from pipeline.query_generator import generate_queries
-from pipeline.web_searcher import search_web
+from pipeline.web_searcher import scrape_urls
 from pipeline.similarity import compute_similarity
 from pipeline.legality_checker import check_legality
 from pipeline.scorer import compute_score
@@ -104,11 +104,15 @@ async def check_text(req: CheckRequest) -> CheckResponse:
     if not prep_result.body_text.strip():
         raise HTTPException(status_code=400, detail="判定対象の本文が見つかりませんでした")
 
-    # STEP 3: 検索キー生成
-    logger.info("STEP 3: Generating queries")
-    query_result = generate_queries(prep_result.tokens, max_queries=req.options.max_queries)
+    # STEP 3: スライディングウィンドウ → Serper検索 → 比較対象URL選定（図21 S91-S99）
+    logger.info("STEP 3: Sliding window queries + Serper search + URL selection")
+    query_result = generate_queries(
+        body_text=prep_result.body_text,
+        cache=_cache,
+        max_queries=req.options.max_queries,
+    )
 
-    if not query_result.queries:
+    if not query_result.top_urls:
         return CheckResponse(
             total_score=0.0,
             status="ok",
@@ -116,10 +120,10 @@ async def check_text(req: CheckRequest) -> CheckResponse:
             processing_time=round(time.time() - start_time, 2),
         )
 
-    # STEP 4: Web照合
-    logger.info(f"STEP 4: Web search with queries: {query_result.queries}")
-    web_results = search_web(
-        queries=query_result.queries,
+    # STEP 4: 選定URLのページテキストをスクレイピング
+    logger.info(f"STEP 4: Scraping top {len(query_result.top_urls)} URLs")
+    web_results = scrape_urls(
+        urls=query_result.top_urls,
         cache=_cache,
     )
 

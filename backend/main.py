@@ -197,6 +197,14 @@ async def check_text(req: CheckRequest) -> CheckResponse:
         )
 
 
+@app.post("/cache/clear")
+async def clear_cache():
+    """キャッシュを全削除する。Serper API の検索結果・スクレイピング結果がすべて消える。"""
+    deleted = _cache.clear()
+    logger.info(f"Cache cleared: {deleted} entries deleted")
+    return {"deleted": deleted}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

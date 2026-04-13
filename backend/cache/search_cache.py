@@ -33,3 +33,13 @@ class SearchCache:
         expired_keys = [k for k, (_, exp) in self._store.items() if now > exp]
         for k in expired_keys:
             del self._store[k]
+
+    def clear(self) -> int:
+        """全エントリを削除し、削除した件数を返す。"""
+        count = len(self._store)
+        self._store.clear()
+        return count
+
+    def size(self) -> int:
+        """現在のエントリ数を返す。"""
+        return len(self._store)

@@ -20,6 +20,7 @@ export interface CheckResponse {
   status: "ok" | "warning" | "danger" | "critical";
   matches: MatchResult[];
   processing_time: number;
+  per_source_scores: Record<string, number>;
 }
 
 export async function checkText(

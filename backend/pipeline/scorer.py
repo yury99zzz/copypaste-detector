@@ -19,9 +19,11 @@ class MatchOutput:
 
 @dataclass
 class ScoreOutput:
-    total_score: float           # 引用割合(%)
-    status: str                  # "ok" | "warning" | "danger" | "critical"
+    total_score: float                          # 引用割合(%)
+    status: str                                 # "ok" | "warning" | "danger" | "critical"
     matches: list[MatchOutput] = field(default_factory=list)
+    per_source_scores: dict[str, float] = field(default_factory=dict)
+    # 文献ごとの引用割合(%) — 特許図31・33準拠
 
 
 def _status_from_score(score: float) -> str:
@@ -88,10 +90,24 @@ def compute_score(
 
     total_score = (illegal_chars / total_chars) * 100
 
+    # 文献ごとの引用割合（特許図31・33準拠）
+    per_source_ranges: dict[str, list[tuple[int, int]]] = {}
+    for lr in legality_results:
+        if not lr.is_legal:
+            url = lr.span.source_url
+            per_source_ranges.setdefault(url, []).append((lr.span.start, lr.span.end))
+
+    per_source_scores: dict[str, float] = {}
+    for url, ranges in per_source_ranges.items():
+        source_merged = _merge_ranges(ranges)
+        source_chars = sum(end - start for start, end in source_merged)
+        per_source_scores[url] = round((source_chars / total_chars) * 100, 1)
+
     return ScoreOutput(
         total_score=round(total_score, 1),
         status=_status_from_score(total_score),
         matches=matches,
+        per_source_scores=per_source_scores,
     )
 
 

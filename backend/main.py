@@ -7,12 +7,20 @@ POST /check エンドポイントでコピペ検出パイプラインを実行
   - スクレイピング:        各 10 秒（並列 N 件）
   - パイプライン全体:      25 秒でタイムアウト → HTTP 504
     （Heroku の 30 秒制限に 5 秒のマージンを確保）
+
+Heroku スリープ対策:
+  - 起動時にバックグラウンドタスクを起動
+  - 25 分ごとに GET /ping を自分自身に送信してスリープを防ぐ
+  - 環境変数 APP_URL にデプロイ先 URL を設定すること
+    （例: https://your-app.herokuapp.com）
 """
 import asyncio
+import os
 import time
 import logging
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -28,15 +36,37 @@ from pipeline.scorer import compute_score
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PIPELINE_TIMEOUT = 25.0  # 秒（Heroku 30s - 5s マージン）
+PIPELINE_TIMEOUT = 25.0        # 秒（Heroku 30s - 5s マージン）
+KEEPALIVE_INTERVAL = 25 * 60   # 25 分（Heroku の 30 分スリープより短く）
 
 _cache: SearchCache = SearchCache(ttl=86400)
+
+
+async def _keepalive_loop(self_url: str) -> None:
+    """25 分ごとに自分自身の /ping を叩いて Heroku のスリープを防ぐ"""
+    while True:
+        await asyncio.sleep(KEEPALIVE_INTERVAL)
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{self_url}/ping")
+            logger.info(f"Keepalive ping → {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Keepalive ping failed: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("CopypasteDetector backend starting up")
+    self_url = os.environ.get("APP_URL", "").rstrip("/")
+    task = None
+    if self_url:
+        task = asyncio.create_task(_keepalive_loop(self_url))
+        logger.info(f"Keepalive task started (target: {self_url}/ping every {KEEPALIVE_INTERVAL}s)")
+    else:
+        logger.info("APP_URL not set — keepalive disabled")
     yield
+    if task:
+        task.cancel()
     logger.info("CopypasteDetector backend shutting down")
 
 
@@ -85,6 +115,7 @@ class CheckResponse(BaseModel):
     status: str
     matches: list[MatchResult]
     processing_time: float
+    per_source_scores: dict[str, float] = {}  # 文献ごとの引用割合(%)
 
 
 # ------------------------------------------------------------------ #
@@ -166,6 +197,7 @@ async def _run_pipeline(req: CheckRequest, start_time: float) -> CheckResponse:
             for m in score_output.matches
         ],
         processing_time=processing_time,
+        per_source_scores=score_output.per_source_scores,
     )
 
 
@@ -203,6 +235,12 @@ async def clear_cache():
     deleted = _cache.clear()
     logger.info(f"Cache cleared: {deleted} entries deleted")
     return {"deleted": deleted}
+
+
+@app.get("/ping")
+async def ping():
+    """Heroku スリープ防止用 ping エンドポイント"""
+    return {"status": "pong"}
 
 
 @app.get("/health")

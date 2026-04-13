@@ -141,6 +141,7 @@ const App: React.FC = () => {
                 score={result.total_score}
                 status={result.status}
                 processingTime={result.processing_time}
+                perSourceScores={result.per_source_scores}
               />
             </div>
 

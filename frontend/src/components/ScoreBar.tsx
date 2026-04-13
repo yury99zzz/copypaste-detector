@@ -22,9 +22,18 @@ interface ScoreBarProps {
   score: number;
   status: Status;
   processingTime?: number;
+  perSourceScores?: Record<string, number>;
 }
 
-const ScoreBar: React.FC<ScoreBarProps> = ({ score, status, processingTime }) => {
+function _hostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
+const ScoreBar: React.FC<ScoreBarProps> = ({ score, status, processingTime, perSourceScores }) => {
   const cfg = STATUS_CONFIG[status];
   const barWidth = Math.min(score, 100);
 
@@ -107,6 +116,64 @@ const ScoreBar: React.FC<ScoreBarProps> = ({ score, status, processingTime }) =>
         <div style={{ position: "absolute", left: "20%", top: "-18px", width: "1px", height: "8px", backgroundColor: "#d1d5db" }} />
         <div style={{ position: "absolute", left: "80%", top: "-18px", width: "1px", height: "8px", backgroundColor: "#d1d5db" }} />
       </div>
+
+      {/* 文献ごとの引用割合（特許図31・33準拠） */}
+      {perSourceScores && Object.keys(perSourceScores).length > 0 && (
+        <div style={{ marginTop: "4px" }}>
+          <div style={{ fontSize: "11px", color: "#6b7280", marginBottom: "6px" }}>
+            文献別引用割合
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            {Object.entries(perSourceScores)
+              .sort((a, b) => b[1] - a[1])
+              .map(([url, pct]) => {
+                const host = _hostname(url);
+                const barColor = pct >= 80 ? "#dc2626" : pct >= 20 ? "#ca8a04" : "#16a34a";
+                return (
+                  <div key={url} style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px" }}>
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        color: "#2563eb",
+                        minWidth: "160px",
+                        maxWidth: "280px",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={url}
+                    >
+                      {host}
+                    </a>
+                    <div
+                      style={{
+                        flex: 1,
+                        height: "6px",
+                        backgroundColor: "#e5e7eb",
+                        borderRadius: "9999px",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: `${Math.min(pct, 100)}%`,
+                          height: "100%",
+                          backgroundColor: barColor,
+                          borderRadius: "9999px",
+                        }}
+                      />
+                    </div>
+                    <span style={{ fontWeight: 700, color: barColor, minWidth: "40px", textAlign: "right" }}>
+                      {pct.toFixed(1)}%
+                    </span>
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

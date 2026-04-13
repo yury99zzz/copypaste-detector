@@ -3,10 +3,12 @@ STEP 3: 検索キー生成 + Web検索 + 比較対象URL選定
 特許第5510912号 図21（S91-S99）準拠
 
 処理フロー:
-  S94-S98: 判定範囲を 32 文字以内のスライディングウィンドウで分割
-  S95-S96: 各ウィンドウを引用符付きクエリ("...")として Serper API で検索
-           → asyncio.gather で最大 5 リクエストを並列実行（各 10 秒タイムアウト）
-  S99    : 全クエリ横断で最も出現頻度の高い URL を比較対象として選定
+  S94-S98: テキスト全体を 32 文字ずつ区切って全チャンクを生成
+           → 代表的な SEARCH_QUERY_COUNT（10）個を均等サンプリング
+  S95-S96: 各チャンクを引用符付きクエリ("...")として Serper API で並列検索
+           → asyncio.gather で最大 SEARCH_QUERY_COUNT リクエストを同時実行
+  S99    : 全クエリ横断で URL 出現頻度を集計し、上位 TOP_URLS_COUNT（3）件を選定
+           → 分散コピペでも頻出 URL が浮かび上がる仕組み
 
 除外ドメイン:
   jstage.jst.go.jp — ペイウォール・構造化テキスト取得不可のため除外
@@ -27,8 +29,10 @@ logger = logging.getLogger(__name__)
 
 # S93: 制限文字数
 WINDOW_SIZE: int = 32
-# 検索に使うウィンドウの最大数
-MAX_QUERIES: int = 5
+# 全チャンクから検索に使う代表チャンク数
+SEARCH_QUERY_COUNT: int = 10
+# S99: 比較対象として返す最頻出 URL の件数
+TOP_URLS_COUNT: int = 3
 
 SERPER_API_URL = "https://google.serper.dev/search"
 SERPER_TIMEOUT = 10.0   # 1リクエストあたりのタイムアウト（秒）
@@ -119,21 +123,22 @@ async def generate_queries(
     body_text: str,
     cache: SearchCache,
     api_key: Optional[str] = None,
-    max_queries: int = MAX_QUERIES,
+    max_queries: int = SEARCH_QUERY_COUNT,
 ) -> QueryResult:
     """
     図21 S91-S99 の全処理を実行する（非同期版）。
 
-    1. 32 文字ウィンドウに分割し、max_queries 個を均等サンプリング（S94-S98）
-    2. キャッシュミス分のクエリを asyncio.gather で並列検索（S95-S96）
-       - 各リクエストのタイムアウト: SERPER_TIMEOUT 秒
-    3. 全クエリの結果 URL を集計し出現頻度順に並べる（S99）
+    1. テキスト全体を 32 文字ずつ区切って全チャンクを生成（S94-S98）
+    2. 全チャンクから代表的な max_queries 個を均等サンプリング
+    3. キャッシュミス分を asyncio.gather で並列検索（S95-S96・各 SERPER_TIMEOUT 秒）
+    4. URL 出現頻度を集計し上位 TOP_URLS_COUNT 件を比較対象として返す（S99）
+       → テキスト各所から同一 URL が検出されるほどスコアが上がる分散コピペ検出
 
     Args:
         body_text:   判定対象の本文テキスト
         cache:       SearchCache（24 時間 TTL）
         api_key:     Serper API キー（None なら環境変数 SERPER_API_KEY を使用）
-        max_queries: 使用するウィンドウ数の上限（デフォルト 5）
+        max_queries: サンプリングするチャンク数（デフォルト SEARCH_QUERY_COUNT=10）
     """
     if not body_text.strip():
         return QueryResult(queries=[], top_urls=[], url_freq={})
@@ -141,12 +146,15 @@ async def generate_queries(
     if api_key is None:
         api_key = os.environ.get("SERPER_API_KEY", "")
 
-    # S94-S98: 32 文字ウィンドウ生成 → max_queries 個を均等サンプリング
+    # S94-S98: テキスト全体を 32 文字チャンクに分割 → max_queries 個を均等サンプリング
     all_windows = _build_windows(body_text)
     selected = _sample_windows(all_windows, max_queries)
     queries = [f'"{w}"' for w in selected]
 
-    logger.info(f"Window queries: {len(queries)}/{len(all_windows)} (text={len(body_text)} chars)")
+    logger.info(
+        f"Window queries: {len(queries)}/{len(all_windows)} chunks "
+        f"(text={len(body_text)} chars)"
+    )
 
     if not api_key:
         logger.warning("SERPER_API_KEY not set — skipping web search")
@@ -181,9 +189,13 @@ async def generate_queries(
             url_counter.update(urls)
             logger.debug(f"{query} → {len(urls)} URLs")
 
-    # S99: 出現頻度の高い URL を比較対象として選定
-    top_urls = [url for url, _ in url_counter.most_common()]
-    logger.info(f"Selected {len(top_urls)} URLs, top={top_urls[:3]}")
+    # S99: 出現頻度の高い URL 上位 TOP_URLS_COUNT 件を比較対象として選定
+    # 複数チャンクで同一 URL がヒットするほど頻度が上がり、分散コピペを検出できる
+    top_urls = [url for url, _ in url_counter.most_common(TOP_URLS_COUNT)]
+    logger.info(
+        f"URL frequency: {len(url_counter)} unique, "
+        f"top{TOP_URLS_COUNT}={top_urls}"
+    )
 
     return QueryResult(
         queries=queries,

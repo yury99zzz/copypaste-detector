@@ -124,21 +124,24 @@ async def generate_queries(
     cache: SearchCache,
     api_key: Optional[str] = None,
     max_queries: int = SEARCH_QUERY_COUNT,
+    synonym_variants: list[str] | None = None,
 ) -> QueryResult:
     """
     図21 S91-S99 の全処理を実行する（非同期版）。
 
     1. テキスト全体を 32 文字ずつ区切って全チャンクを生成（S94-S98）
     2. 全チャンクから代表的な max_queries 個を均等サンプリング
-    3. キャッシュミス分を asyncio.gather で並列検索（S95-S96・各 SERPER_TIMEOUT 秒）
-    4. URL 出現頻度を集計し上位 TOP_URLS_COUNT 件を比較対象として返す（S99）
-       → テキスト各所から同一 URL が検出されるほどスコアが上がる分散コピペ検出
+    3. synonym_variants が指定されている場合、各バリアントから 1 チャンクを追加
+       （言い換えコピペ検出 / 特許図14）
+    4. キャッシュミス分を asyncio.gather で並列検索（S95-S96・各 SERPER_TIMEOUT 秒）
+    5. URL 出現頻度を集計し上位 TOP_URLS_COUNT 件を比較対象として返す（S99）
 
     Args:
-        body_text:   判定対象の本文テキスト
-        cache:       SearchCache（24 時間 TTL）
-        api_key:     Serper API キー（None なら環境変数 SERPER_API_KEY を使用）
-        max_queries: サンプリングするチャンク数（デフォルト SEARCH_QUERY_COUNT=10）
+        body_text:        判定対象の本文テキスト
+        cache:            SearchCache（24 時間 TTL）
+        api_key:          Serper API キー（None なら環境変数 SERPER_API_KEY を使用）
+        max_queries:      本文チャンクのサンプリング数（デフォルト SEARCH_QUERY_COUNT=10）
+        synonym_variants: preprocessor が生成した同義語バリアントのリスト
     """
     if not body_text.strip():
         return QueryResult(queries=[], top_urls=[], url_freq={})
@@ -149,11 +152,19 @@ async def generate_queries(
     # S94-S98: テキスト全体を 32 文字チャンクに分割 → max_queries 個を均等サンプリング
     all_windows = _build_windows(body_text)
     selected = _sample_windows(all_windows, max_queries)
+
+    # 同義語バリアントから先頭チャンクを追加（言い換えコピペ対応）
+    # バリアント 1 件につき 1 チャンクだけ追加して Serper コストを抑える
+    for variant in (synonym_variants or []):
+        variant_windows = _build_windows(variant)
+        if variant_windows:
+            selected.append(variant_windows[0])
+
     queries = [f'"{w}"' for w in selected]
 
     logger.info(
-        f"Window queries: {len(queries)}/{len(all_windows)} chunks "
-        f"(text={len(body_text)} chars)"
+        f"Window queries: {len(queries)} "
+        f"(body={len(all_windows)} chunks, variants={len(synonym_variants or [])})"
     )
 
     if not api_key:

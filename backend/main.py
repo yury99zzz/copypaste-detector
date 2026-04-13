@@ -111,6 +111,7 @@ async def _run_pipeline(req: CheckRequest, start_time: float) -> CheckResponse:
         body_text=prep_result.body_text,
         cache=_cache,
         max_queries=req.options.max_queries,
+        synonym_variants=prep_result.synonym_variants,
     )
 
     if not query_result.top_urls:

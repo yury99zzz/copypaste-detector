@@ -142,45 +142,40 @@ def tokenize(text: str) -> list[str]:
 @lru_cache(maxsize=1)
 def _build_synonym_index() -> dict[int, list[str]]:
     """
-    sudachidict の synonym.txt を読み込み、
+    backend/data/synonyms.txt（SudachiDict公式）を読み込み、
     グループID → [語1, 語2, ...] の逆引きインデックスを構築する。
 
-    synonym.txt のCSV列構成（Sudachi公式フォーマット）:
-      col[0]  グループID
-      col[1]  グループ内番号
-      col[2]  出現形使用フラグ
-      col[3]  結合フラグ
-      col[4]  省略語フラグ
-      col[5]  省略形フラグ
-      col[6]  修正フラグ
-      col[7]  表外語フラグ
-      col[8]  品詞
-      col[9]  品詞引継ぎフラグ
-      col[10] 語義番号
-      col[11] 代表語表記  ← ここが語の文字列
+    synonyms.txt の実際のCSV列構成（WorksApplications/SudachiDict）:
+      col[0]  グループID（6桁ゼロ埋め、例: "000001"）
+      col[1]  同一グループ内の見出し語フラグ
+      col[2]  フラグ
+      col[3]  グループ内番号
+      col[4]  フラグ
+      col[5]  フラグ
+      col[6]  語形フラグ（0=標準形, 1=外来語表記, 2=読み仮名）
+      col[7]  品詞（例: "()", "名詞" 等）
+      col[8]  語  ← ここが実際の単語文字列
+      col[9]  (空欄)
+      col[10] (空欄)
+
+    語形フラグ（col[6]）の扱い:
+      0 → 標準表記（"曖昧", "不明確" 等）　採用
+      1 → 外来語・アルファベット表記       採用
+      2 → 読み仮名（"あいまい" 等）        スキップ（検索精度低下のため）
 
     ファイルが見つからない・解析失敗時は空 dict を返す。
     """
-    if not SUDACHI_AVAILABLE:
-        return {}
+    # backend/data/synonyms.txt を最優先で使用
+    data_file = os.path.join(
+        os.path.dirname(__file__),  # pipeline/
+        "..",                       # backend/
+        "data",
+        "synonyms.txt",
+    )
+    synonym_path = os.path.normpath(data_file)
 
-    # sudachidict_core / small / full の順に探す
-    search_packages = ["sudachidict_core", "sudachidict_small", "sudachidict_full"]
-    synonym_path: str | None = None
-    for pkg_name in search_packages:
-        try:
-            pkg = __import__(pkg_name)
-            candidate = os.path.join(
-                os.path.dirname(pkg.__file__), "resources", "synonym.txt"
-            )
-            if os.path.exists(candidate):
-                synonym_path = candidate
-                break
-        except ImportError:
-            continue
-
-    if synonym_path is None:
-        logger.info("synonym.txt not found — synonym expansion disabled")
+    if not os.path.exists(synonym_path):
+        logger.info(f"synonyms.txt not found at {synonym_path} — synonym expansion disabled")
         return {}
 
     index: dict[int, list[str]] = {}
@@ -190,22 +185,47 @@ def _build_synonym_index() -> dict[int, list[str]]:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                cols = [c.strip() for c in line.split(",")]
-                if len(cols) < 12:
+                cols = line.split(",")
+                if len(cols) < 9:
                     continue
                 try:
-                    group_id = int(cols[0])
-                    word = cols[11]
-                    if word:
-                        index.setdefault(group_id, []).append(word)
+                    group_id = int(cols[0])   # col[0]: グループID
+                    form_flag = cols[6].strip()  # col[6]: 語形フラグ
+                    word = cols[8].strip()        # col[8]: 語
+
+                    # 読み仮名（フラグ=2）はスキップ
+                    if not word or form_flag == "2":
+                        continue
+
+                    index.setdefault(group_id, []).append(word)
                 except (ValueError, IndexError):
                     continue
-        logger.info(f"Synonym index loaded: {len(index)} groups from {synonym_path}")
+
+        logger.info(
+            f"Synonym index loaded: {len(index)} groups, "
+            f"{sum(len(v) for v in index.values())} words from {synonym_path}"
+        )
     except Exception as e:
-        logger.warning(f"Failed to load synonym.txt: {e}")
+        logger.warning(f"Failed to load synonyms.txt: {e}")
         return {}
 
     return index
+
+
+@lru_cache(maxsize=1)
+def _build_word_to_group() -> dict[str, int]:
+    """
+    グループID → [語] インデックスを反転させ、語 → グループID の辞書を返す。
+    同一語が複数グループに属する場合は最初に見つかったグループを採用する。
+    """
+    group_index = _build_synonym_index()
+    word_to_gid: dict[str, int] = {}
+    for gid, words in group_index.items():
+        for word in words:
+            if word not in word_to_gid:
+                word_to_gid[word] = gid
+    logger.debug(f"Word-to-group map built: {len(word_to_gid)} entries")
+    return word_to_gid
 
 
 # ------------------------------------------------------------------ #
@@ -242,30 +262,33 @@ def generate_synonym_variants(
     if not SUDACHI_AVAILABLE:
         return []
 
-    synonym_index = _build_synonym_index()
-    if not synonym_index:
+    group_index = _build_synonym_index()
+    if not group_index:
         return []
+
+    # 語 → グループID の逆引きマップをメモ化して構築
+    word_to_gid = _build_word_to_group()
 
     try:
         tokenizer_obj = dictionary.Dictionary().create()
         mode = tokenizer.Tokenizer.SplitMode.C
         morphemes = list(tokenizer_obj.tokenize(body_text, mode))
 
-        # 同義語を持つ形態素の収集: (begin, end, surface, [synonym1, synonym2, ...])
+        # 同義語を持つ形態素の収集: (begin, end, surface, [synonym1, ...])
         candidates: list[tuple[int, int, str, list[str]]] = []
         for m in morphemes:
-            group_ids = m.synonym_group_ids()
-            if not group_ids:
+            surface = m.surface()
+            norm = m.normalized_form()
+
+            # surface または normalized_form で synonyms.txt のグループを引く
+            gid = word_to_gid.get(surface) or word_to_gid.get(norm)
+            if gid is None:
                 continue
 
-            surface = m.surface()
-            synonyms: list[str] = []
-            for gid in group_ids:
-                for word in synonym_index.get(gid, []):
-                    # 表記が同じ語・重複は除外
-                    if word != surface and word != m.normalized_form() and word not in synonyms:
-                        synonyms.append(word)
-
+            synonyms = [
+                w for w in group_index[gid]
+                if w != surface and w != norm
+            ]
             if synonyms:
                 candidates.append((m.begin(), m.end(), surface, synonyms[:3]))
 

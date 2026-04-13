@@ -5,10 +5,6 @@ interface TextInputProps {
   onChange: (value: string) => void;
   onSubmit: () => void;
   isLoading: boolean;
-  threshold: number;
-  onThresholdChange: (v: number) => void;
-  maxQueries: number;
-  onMaxQueriesChange: (v: number) => void;
 }
 
 const TextInput: React.FC<TextInputProps> = ({
@@ -16,10 +12,6 @@ const TextInput: React.FC<TextInputProps> = ({
   onChange,
   onSubmit,
   isLoading,
-  threshold,
-  onThresholdChange,
-  maxQueries,
-  onMaxQueriesChange,
 }) => {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
@@ -46,39 +38,6 @@ const TextInput: React.FC<TextInputProps> = ({
         onFocus={(e) => (e.target.style.borderColor = "#6366f1")}
         onBlur={(e) => (e.target.style.borderColor = "#d1d5db")}
       />
-
-      <div style={{ display: "flex", gap: "24px", flexWrap: "wrap" }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-          <label style={{ fontSize: "12px", color: "#6b7280" }}>
-            類似度閾値: {Math.round(threshold * 100)}%
-          </label>
-          <input
-            type="range"
-            min={0.3}
-            max={0.9}
-            step={0.05}
-            value={threshold}
-            onChange={(e) => onThresholdChange(Number(e.target.value))}
-            style={{ width: "160px" }}
-          />
-        </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-          <label style={{ fontSize: "12px", color: "#6b7280" }}>
-            検索キー数: {maxQueries}
-          </label>
-          <input
-            type="range"
-            min={1}
-            max={10}
-            step={1}
-            value={maxQueries}
-            onChange={(e) => onMaxQueriesChange(Number(e.target.value))}
-            style={{ width: "160px" }}
-          />
-        </div>
-      </div>
-
       <button
         onClick={onSubmit}
         disabled={isLoading || !value.trim()}

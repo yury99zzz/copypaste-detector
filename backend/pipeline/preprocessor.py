@@ -126,9 +126,10 @@ def tokenize(text: str) -> list[str]:
         morphemes = tokenizer_obj.tokenize(text, mode)
         tokens = []
         for m in morphemes:
-            part_of_speech = m.part_of_speech()[0]
-            # 名詞・動詞・形容詞のみ抽出（助詞・助動詞・記号を除外）
-            if part_of_speech in ("名詞", "動詞", "形容詞", "副詞"):
+            pos = m.part_of_speech()
+            # pos[0]: 大分類, pos[1]: 小分類
+            # 名詞-普通名詞・名詞-固有名詞のみ抽出（検索キーとして意味のある語に絞る）
+            if pos[0] == "名詞" and pos[1] in ("普通名詞", "固有名詞"):
                 norm = m.normalized_form()
                 if len(norm) > 1:
                     tokens.append(norm)

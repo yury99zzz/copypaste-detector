@@ -6,8 +6,6 @@ import { checkText, CheckResponse } from "./api/client";
 
 const App: React.FC = () => {
   const [inputText, setInputText] = useState("");
-  const [threshold, setThreshold] = useState(0.5);
-  const [maxQueries, setMaxQueries] = useState(5);
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState<CheckResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -19,8 +17,9 @@ const App: React.FC = () => {
 
     try {
       const res = await checkText(inputText, {
-        threshold,
-        max_queries: maxQueries,
+        // 特許図37に合わせ、20%以上の類似箇所をすべて検出
+        threshold: 0.2,
+        max_queries: 5,
         exclude_quotes: true,
       });
       setResult(res);
@@ -75,10 +74,6 @@ const App: React.FC = () => {
             onChange={setInputText}
             onSubmit={handleSubmit}
             isLoading={isLoading}
-            threshold={threshold}
-            onThresholdChange={setThreshold}
-            maxQueries={maxQueries}
-            onMaxQueriesChange={setMaxQueries}
           />
         </div>
 
@@ -132,12 +127,12 @@ const App: React.FC = () => {
         {/* 結果 */}
         {result && !isLoading && (
           <>
-            {/* スコアバー */}
+            {/* 引用割合スコア（画面上部に大きく） */}
             <div
               style={{
                 backgroundColor: "#fff",
                 borderRadius: "12px",
-                padding: "20px 24px",
+                padding: "24px",
                 boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
                 marginBottom: "20px",
               }}

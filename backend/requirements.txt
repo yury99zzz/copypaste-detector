@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+sudachipy
+sudachidict_core
+rapidfuzz
+neologdn
+requests
+beautifulsoup4
+python-dotenv
+pydantic

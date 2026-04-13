@@ -5,11 +5,13 @@ STEP 3: 検索キー生成 + Web検索 + 比較対象URL選定
 処理フロー:
   S94-S98: 判定範囲を 32 文字以内のスライディングウィンドウで分割
   S95-S96: 各ウィンドウを引用符付きクエリ("...")として Serper API で検索
+           → asyncio.gather で最大 5 リクエストを並列実行（各 10 秒タイムアウト）
   S99    : 全クエリ横断で最も出現頻度の高い URL を比較対象として選定
 
 除外ドメイン:
   jstage.jst.go.jp — ペイウォール・構造化テキスト取得不可のため除外
 """
+import asyncio
 import hashlib
 import logging
 import os
@@ -17,7 +19,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Optional
 
-import requests
+import httpx
 
 from cache.search_cache import SearchCache
 
@@ -29,8 +31,8 @@ WINDOW_SIZE: int = 32
 MAX_QUERIES: int = 5
 
 SERPER_API_URL = "https://google.serper.dev/search"
-SERPER_TIMEOUT = 10        # seconds
-SERPER_NUM_RESULTS = 5     # 1クエリあたりの取得件数
+SERPER_TIMEOUT = 10.0   # 1リクエストあたりのタイムアウト（秒）
+SERPER_NUM_RESULTS = 5  # 1クエリあたりの取得件数
 
 # 比較対象から除外するドメイン
 EXCLUDED_DOMAINS: frozenset[str] = frozenset([
@@ -50,10 +52,7 @@ class QueryResult:
 # ------------------------------------------------------------------ #
 
 def _build_windows(text: str) -> list[str]:
-    """
-    テキストを先頭から WINDOW_SIZE 文字ずつ非重複で分割する。
-    空白のみのチャンクは除外する。
-    """
+    """テキストを先頭から WINDOW_SIZE 文字ずつ非重複で分割する。"""
     windows: list[str] = []
     i = 0
     while i < len(text):
@@ -65,10 +64,7 @@ def _build_windows(text: str) -> list[str]:
 
 
 def _sample_windows(windows: list[str], max_count: int) -> list[str]:
-    """
-    全ウィンドウからテキスト全体をカバーするよう max_count 個を均等サンプリングする。
-    ウィンドウ数が max_count 以下ならそのまま返す。
-    """
+    """全ウィンドウから max_count 個を均等サンプリングしてテキスト全体をカバーする。"""
     if len(windows) <= max_count:
         return windows
     step = (len(windows) - 1) / (max_count - 1)
@@ -86,20 +82,23 @@ def _is_excluded(url: str) -> bool:
 
 
 # ------------------------------------------------------------------ #
-# 図21 S95-S96: Serper API 検索
+# 図21 S95-S96: Serper API 非同期検索
 # ------------------------------------------------------------------ #
 
-def _serper_search(query: str, api_key: str) -> list[str]:
+async def _serper_search_async(
+    query: str,
+    api_key: str,
+    client: httpx.AsyncClient,
+) -> list[str]:
     """
-    1 クエリを Serper API で検索し、除外ドメイン以外の URL リストを返す。
-    クエリは "..." 形式の完全一致検索。
+    1 クエリを Serper API で非同期検索し、除外ドメイン以外の URL リストを返す。
+    タイムアウト・エラー時は空リストを返す。
     """
     try:
-        resp = requests.post(
+        resp = await client.post(
             SERPER_API_URL,
             json={"q": query, "num": SERPER_NUM_RESULTS, "gl": "jp", "hl": "ja"},
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            timeout=SERPER_TIMEOUT,
         )
         resp.raise_for_status()
         urls = [item["link"] for item in resp.json().get("organic", []) if item.get("link")]
@@ -116,17 +115,18 @@ def _serper_search(query: str, api_key: str) -> list[str]:
 # メイン関数
 # ------------------------------------------------------------------ #
 
-def generate_queries(
+async def generate_queries(
     body_text: str,
     cache: SearchCache,
     api_key: Optional[str] = None,
     max_queries: int = MAX_QUERIES,
 ) -> QueryResult:
     """
-    図21 S91-S99 の全処理を実行する。
+    図21 S91-S99 の全処理を実行する（非同期版）。
 
-    1. 32 文字ウィンドウに分割し、テキスト全体を max_queries 個で均等カバー（S94-S98）
-    2. 各ウィンドウを "..." 形式でクエリ化し Serper API を検索（S95-S96）
+    1. 32 文字ウィンドウに分割し、max_queries 個を均等サンプリング（S94-S98）
+    2. キャッシュミス分のクエリを asyncio.gather で並列検索（S95-S96）
+       - 各リクエストのタイムアウト: SERPER_TIMEOUT 秒
     3. 全クエリの結果 URL を集計し出現頻度順に並べる（S99）
 
     Args:
@@ -134,9 +134,6 @@ def generate_queries(
         cache:       SearchCache（24 時間 TTL）
         api_key:     Serper API キー（None なら環境変数 SERPER_API_KEY を使用）
         max_queries: 使用するウィンドウ数の上限（デフォルト 5）
-
-    Returns:
-        QueryResult
     """
     if not body_text.strip():
         return QueryResult(queries=[], top_urls=[], url_freq={})
@@ -155,22 +152,34 @@ def generate_queries(
         logger.warning("SERPER_API_KEY not set — skipping web search")
         return QueryResult(queries=queries, top_urls=[], url_freq={})
 
-    # S95-S96: 各クエリで検索し URL を収集
     url_counter: Counter[str] = Counter()
 
+    # キャッシュヒット分を先に処理し、ミス分だけ並列リクエスト対象にする
+    to_fetch: list[str] = []
     for query in queries:
         cache_key = "qgen_" + hashlib.md5(query.encode()).hexdigest()
         cached: Optional[list[str]] = cache.get(cache_key)
-
         if cached is not None:
             url_counter.update(cached)
             logger.debug(f"Cache hit: {query}")
-            continue
+        else:
+            to_fetch.append(query)
 
-        urls = _serper_search(query, api_key)
-        cache.set(cache_key, urls)   # S96: キャッシュに記憶
-        url_counter.update(urls)
-        logger.debug(f"{query} → {len(urls)} URLs")
+    # S95-S96: キャッシュミス分を asyncio.gather で並列実行
+    if to_fetch:
+        timeout = httpx.Timeout(SERPER_TIMEOUT)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            raw_results = await asyncio.gather(
+                *[_serper_search_async(q, api_key, client) for q in to_fetch],
+                return_exceptions=True,
+            )
+
+        for query, result in zip(to_fetch, raw_results):
+            urls: list[str] = result if isinstance(result, list) else []
+            cache_key = "qgen_" + hashlib.md5(query.encode()).hexdigest()
+            cache.set(cache_key, urls)   # S96: キャッシュに記憶
+            url_counter.update(urls)
+            logger.debug(f"{query} → {len(urls)} URLs")
 
     # S99: 出現頻度の高い URL を比較対象として選定
     top_urls = [url for url, _ in url_counter.most_common()]

@@ -4,7 +4,7 @@ sudachipy
 sudachidict_core
 rapidfuzz
 neologdn
-requests
+httpx
 beautifulsoup4
 python-dotenv
 pydantic
